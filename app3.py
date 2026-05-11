@@ -1,0 +1,819 @@
+
+import json
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
+import sqlite3
+import time
+import re
+import os
+from PIL import ImageFilter
+from PIL import Image, ImageDraw, ImageFont
+from io import BytesIO
+import unicodedata
+import arabic_reshaper
+from bidi.algorithm import get_display
+from ai import classify_news, TEMPLATES
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
+BASE_DIR = r"C:\Users\oalaa\مانشت"
+TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
+
+TEMPLATE_CONFIG = {
+
+    "رياضة": {
+        "template": os.path.join(TEMPLATES_DIR, "رياضة.png"),
+        "image_box": (0, 0, 1080, 835),
+        "text_box": (0, 940, 1060, 1200),
+        "align": "center"
+    },
+
+    "سياسة": {
+        "template": os.path.join(TEMPLATES_DIR, "سياسة.png"),
+        "image_box": (0, 0, 1080, 835),
+        "text_box": (340, 820, 1070, 1050),
+        "align": "center"
+    },
+
+    "فن": {
+        "template": os.path.join(TEMPLATES_DIR, "فن.png"),
+        "image_box": (0, 210, 1080, 1070),
+        "text_box": (50, 1050, 1030, 1280),
+        "align": "center"
+    },
+
+    "اجتماعية": {
+        "template": os.path.join(TEMPLATES_DIR, "اجتماعية.png"),
+        "image_box": (35, 180, 1050, 758),
+        "text_box": (10, 845, 1070, 1210),
+        "align": "center"
+    },
+
+    "عام": {
+        "template": os.path.join(TEMPLATES_DIR, "عام.png"),
+        "image_box": (35, 180, 1050, 758),
+        "text_box": (10, 845, 1070, 1210),
+        "align": "center"
+    }
+
+}
+
+TOKEN = os.getenv("TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+
+MAP = {
+    "sports": "رياضة",
+    "politics": "سياسة",
+    "art": "فن",
+    "social": "اجتماعية"
+}
+
+
+
+def clean_text(text):
+    return unicodedata.normalize("NFKC", text)
+
+
+def send_photo(image_path, title, url, category, confidence, content):
+    api_url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+
+    title = clean_text(title)
+    content = clean_text(content)
+
+
+    short_content = content[:500] + "..." if len(content) > 500 else content
+
+    caption = f"""
+📰 {title}
+
+📂 التصنيف: {category}
+🎯 الثقة: {round(confidence * 100, 1)}%
+
+📝 {short_content}
+
+📌 اضغط على الزر لقراءة التفاصيل
+"""
+
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "📖 Read More",
+                    "url": url
+                }
+            ],
+            [
+                {
+                    "text": "🔗 Share",
+                    "url": f"https://t.me/share/url?url={url}&text={title}"
+                }
+            ]
+        ]
+    }
+
+    with open(image_path, "rb") as photo:
+        requests.post(
+            api_url,
+            data={
+                "chat_id": CHAT_ID,
+                "caption": caption,
+                "reply_markup": json.dumps(keyboard),
+                "parse_mode": "HTML"
+            },
+            files={
+                "photo": photo
+            }
+        )
+
+
+# =========================
+# CONFIG
+# =========================
+
+BASE_URL = "https://mnsht.net"
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+}
+
+# =========================
+# TEMPLATE SETTINGS
+# =========================
+
+TEMPLATE_PATH = "template.png"
+FONT_PATH = "Cairo-Black.ttf"
+
+OUTPUT_FOLDER = "generated"
+
+MAX_FONT_SIZE = 60
+MIN_FONT_SIZE = 26
+
+TEXT_COLOR = (255, 255, 255)
+
+# # =========================
+# # IMAGE AREA
+# # =========================
+
+
+# IMAGE_X = 0
+# IMAGE_Y = 0
+
+# IMAGE_WIDTH = 1080
+# IMAGE_HEIGHT = 835
+
+# # =========================
+# # TEXT AREA
+# # =========================
+# # 340,840 -> 1070,1070
+
+# TEXT_BOX_X = 340
+# TEXT_BOX_Y = 820
+
+# TEXT_BOX_WIDTH = 730
+# TEXT_BOX_HEIGHT = 230
+
+# LINE_HEIGHT = 65
+
+# =========================
+# CREATE OUTPUT FOLDER
+# =========================
+
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+# =========================
+# SESSION
+# =========================
+
+session = requests.Session()
+session.headers.update(HEADERS)
+
+print("APP STARTED")
+print("WAITING FOR NEWS...")
+
+# =========================
+# DATABASE
+# =========================
+
+conn = sqlite3.connect("news.db")
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS news (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT UNIQUE,
+    url TEXT UNIQUE,
+    image TEXT,
+    category TEXT,
+    confidence REAL,
+    content TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS confirmed_training (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT UNIQUE,
+    category TEXT,
+    confidence REAL,
+    source TEXT DEFAULT 'auto',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+cursor.execute("""
+CREATE UNIQUE INDEX IF NOT EXISTS idx_news_url ON news(url)
+""")
+
+
+try:
+    cursor.execute("ALTER TABLE news ADD COLUMN reviewed INTEGER DEFAULT 0")
+    conn.commit()
+except sqlite3.OperationalError:
+    pass
+
+try:
+    cursor.execute("ALTER TABLE news ADD COLUMN content TEXT")
+    conn.commit()
+except sqlite3.OperationalError:
+    pass
+
+conn.commit()
+# =========================
+# LOAD FONT
+# =========================
+
+
+# =========================
+# HELPERS
+# =========================
+
+def get_html():
+
+    response = session.get(
+        BASE_URL,
+        timeout=20
+    )
+
+    response.raise_for_status()
+
+    return response.text
+
+def news_exists(url):
+
+    cursor.execute(
+        "SELECT id FROM news WHERE url = ?",
+        (url,)
+    )
+
+    return cursor.fetchone() is not None
+
+def clean_image_url(src):
+
+    if not src:
+        return None
+
+    full_url = urljoin(
+        BASE_URL,
+        src
+    )
+
+    # إزالة الكاش
+    full_url = full_url.replace(
+        "/UploadCache/libfiles/",
+        "/Upload/libfiles/"
+    )
+
+    # إزالة المقاسات
+    full_url = re.sub(
+        r'/\d+x\d+o?/',
+        '/',
+        full_url
+    )
+
+    return full_url
+
+
+def fetch_article_content(url, max_words=50):
+    try:
+        response = session.get(url, timeout=15)
+        soup = BeautifulSoup(response.text, "lxml")
+
+        
+        tag = soup.select_one("div.paragraph-list")
+
+        if not tag:
+            return None
+
+        
+        paragraphs = tag.find_all("p")
+        content = " ".join(p.get_text(strip=True) for p in paragraphs)
+
+        
+        words = content.split()
+        content = " ".join(words[:max_words])
+
+        return content if content else None
+
+    except Exception:
+        return None
+
+# =========================
+# ARABIC TEXT
+# =========================
+
+def prepare_ar_text(text):
+
+    reshaped = arabic_reshaper.reshape(text)
+
+    bidi_text = get_display(
+        reshaped
+    )
+
+    return bidi_text
+
+# =========================
+# WRAP TEXT
+# =========================
+
+
+def wrap_text(draw, text, font, max_width):
+
+    words = text.split()
+
+    lines = []
+
+    current_line = ""
+
+    for word in words:
+
+        test_line = (
+            current_line + " " + word
+            if current_line else word
+        )
+
+        bbox = draw.textbbox(
+            (0, 0),
+            test_line,
+            font=font
+        )
+
+        width = bbox[2] - bbox[0]
+
+        if width <= max_width:
+
+            current_line = test_line
+
+        else:
+
+            if current_line:
+                lines.append(current_line)
+
+            current_line = word
+
+    if current_line:
+        lines.append(current_line)
+
+    return lines
+
+
+def fit_text(
+    draw,
+    text,
+    font_path,
+    max_width,
+    max_height
+):
+
+    best_font = None
+    best_lines = None
+    best_line_height = None
+
+    for size in range(MAX_FONT_SIZE, MIN_FONT_SIZE - 1, -2):
+
+        font = ImageFont.truetype(
+            font_path,
+            size
+        )
+
+        lines = wrap_text(
+            draw,
+            text,
+            font,
+            max_width
+        )
+
+        line_height = size + 15
+
+        total_height = (
+            len(lines) *
+            line_height
+        )
+
+        longest_line = 0
+
+        for line in lines:
+
+            bbox = draw.textbbox(
+                (0, 0),
+                line,
+                font=font
+            )
+
+            width = bbox[2] - bbox[0]
+
+            if width > longest_line:
+                longest_line = width
+
+        if (
+            total_height <= max_height
+            and
+            longest_line <= max_width
+        ):
+
+            best_font = font
+            best_lines = lines
+            best_line_height = line_height
+
+            break
+
+    return (
+        best_font,
+        best_lines,
+        best_line_height
+    )
+
+def generate_post_image(title, image_url, news_id, url, category):
+
+    print("CATEGORY DEBUG:", category)
+    print("AVAILABLE KEYS:", TEMPLATE_CONFIG.keys())
+
+    try:
+
+        # =====================
+        # LOAD CONFIG
+        # =====================
+
+        config = TEMPLATE_CONFIG.get(category)
+
+        if config is None:
+            print(f"⚠️ Unknown category: {category} → fallback to عام")
+            config = TEMPLATE_CONFIG["عام"]
+
+        image_x1, image_y1, image_x2, image_y2 = config["image_box"]
+
+        text_x1, text_y1, text_x2, text_y2 = config["text_box"]
+
+        TEXT_BOX_X = text_x1
+        TEXT_BOX_Y = text_y1
+        TEXT_BOX_WIDTH = text_x2 - text_x1
+        TEXT_BOX_HEIGHT = text_y2 - text_y1
+
+        # =====================
+        # LOAD TEMPLATE
+        # =====================
+
+        template_path = config.get("template")
+        if not os.path.exists(template_path):
+            print(f"❌ TEMPLATE NOT FOUND: {template_path}")
+            return
+
+        template = Image.open(template_path).convert("RGBA")
+
+
+        # =====================
+        # DOWNLOAD IMAGE
+        # =====================
+
+        news_img = None
+
+        if image_url:
+            try:
+                response = session.get(image_url, timeout=20)
+                news_img = Image.open(BytesIO(response.content)).convert("RGBA")
+            except:
+                news_img = None
+
+        # =====================
+        # PROCESS IMAGE
+        # =====================
+
+        if news_img:
+
+            img_ratio = news_img.width / news_img.height
+            target_ratio = (image_x2 - image_x1) / (image_y2 - image_y1)
+
+            if img_ratio > target_ratio:
+                new_width = int(news_img.height * target_ratio)
+                left = (news_img.width - new_width) // 2
+
+                news_img = news_img.crop(
+                    (left, 0, left + new_width, news_img.height)
+                )
+
+            else:
+                new_height = int(news_img.width / target_ratio)
+                top = (news_img.height - new_height) // 2
+
+                news_img = news_img.crop(
+                    (0, top, news_img.width, top + new_height)
+                )
+
+            news_img = news_img.resize(
+                (image_x2 - image_x1, image_y2 - image_y1),
+                Image.LANCZOS
+            )
+
+        # =====================
+        # LAYER SYSTEM
+        # =====================
+
+        base = Image.new("RGBA", template.size, (0, 0, 0, 0))
+        base.paste(template, (0, 0))
+
+        # default + social → image on top
+        if category in ["عام", "اجتماعية"]:
+
+            if news_img:
+                base.paste(news_img, (image_x1, image_y1), news_img)
+
+            final_img = base
+
+        else:
+
+            background = Image.new("RGBA", template.size, (0, 0, 0, 255))
+
+            if news_img:
+                background.paste(news_img, (image_x1, image_y1))
+
+            final_img = Image.alpha_composite(background, template)
+
+        # =====================
+        # TEXT DRAWING
+        # =====================
+
+        draw = ImageDraw.Draw(final_img)
+
+        title = prepare_ar_text(title)
+
+        font, lines, line_height = fit_text(
+            draw,
+            title,
+            FONT_PATH,
+            TEXT_BOX_WIDTH,
+            TEXT_BOX_HEIGHT
+        )
+
+        lines.reverse()
+
+        total_text_height = len(lines) * line_height
+
+        y = TEXT_BOX_Y + ((TEXT_BOX_HEIGHT - total_text_height) // 2)
+
+        for line in lines:
+
+            bbox = draw.textbbox((0, 0), line, font=font)
+            width = bbox[2] - bbox[0]
+
+            x = TEXT_BOX_X + ((TEXT_BOX_WIDTH - width) // 2)
+
+            draw.text((x + 2, y + 2), line, font=font, fill=(0, 0, 0))
+
+            draw.text(
+                (x, y),
+                line,
+                font=font,
+                fill=TEXT_COLOR,
+                stroke_width=1,
+                stroke_fill=TEXT_COLOR
+            )
+
+            y += line_height
+
+        # =====================
+        # SAVE
+        # =====================
+
+        output_path = os.path.join(OUTPUT_FOLDER, f"news_{news_id}.png")
+
+        final_img.save(output_path, quality=100)
+
+        send_photo(output_path, title=title, url=url)
+
+        print(f"🖼️ IMAGE SAVED: {output_path}")
+
+    except Exception as e:
+        print(f"IMAGE ERROR: {e}")
+
+# =========================
+# EXTRACT NEWS
+# =========================
+
+def extract_news(
+    html,
+    limit=5
+):
+
+    soup = BeautifulSoup(
+        html,
+        "lxml"
+    )
+
+    news_list = []
+
+    cards = soup.find_all(
+        "div",
+        class_="item-card"
+    )
+
+    count = 0
+
+    for card in cards:
+
+        if count >= limit:
+            break
+
+        try:
+
+            a_tag = card.find("a")
+
+            if not a_tag:
+                continue
+
+            url = urljoin(
+                BASE_URL,
+                a_tag.get("href")
+            )
+
+            if news_exists(url):
+                continue
+
+            h3 = card.find("h3")
+
+            title = (
+                h3.get_text(strip=True)
+                if h3 else
+                "بدون عنوان"
+            )
+
+
+            img_tag = card.find("img")
+
+            raw_img_src = None
+
+            if img_tag:
+
+                raw_img_src = (
+                    img_tag.get("data-src")
+                    or
+                    img_tag.get("src")
+                )
+
+            final_image = clean_image_url(
+                raw_img_src
+            )
+
+
+            if (
+                final_image and
+                "logo" in final_image.lower()
+            ):
+                final_image = None
+
+            news_list.append({
+                "title": title,
+                "url": url,
+                "image": final_image,
+                "content": fetch_article_content(url)  
+            })
+
+            count += 1
+
+
+        except Exception as e:
+
+            print(
+                f"CARD ERROR: {e}"
+            )
+
+    return news_list
+
+
+
+def save_news(news):
+
+    for item in news:
+
+        try:
+            category, confidence = classify_news(
+            item["title"],
+            content=item.get("content")
+        )
+
+            # =====================
+            # HANDLE UNKNOWN
+            # =====================
+            if category is None:
+                print("⚠️ LOW CONFIDENCE NEWS:", item["title"])
+                category = "عام"
+                confidence = 0.0
+
+            # =====================
+            # VALIDATE CATEGORY
+            # =====================
+            if category not in TEMPLATE_CONFIG:
+                category = "عام"
+
+            # =====================
+            # SAVE TO DB
+            # =====================
+            cursor.execute("""
+            INSERT INTO news (title, url, image, category, confidence, content)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                item["title"],
+                item["url"],
+                item["image"],
+                category,
+                confidence,
+                item.get("content")   
+            ))
+
+            news_id = cursor.lastrowid
+
+            print("\n🟢 NEW ARTICLE")
+            print(f"TITLE: {item['title']}")
+
+            generate_post_image(
+                item["title"],
+                item["image"],
+                news_id,
+                item["url"],
+                category
+            )
+
+            # =====================
+            # SAVE TO TRAINING DATA
+            # =====================
+            if confidence >= 0.65 and category != "عام":
+                cursor.execute("""
+                    INSERT OR IGNORE INTO confirmed_training 
+                    (title, category, confidence)
+                    VALUES (?, ?, ?)
+                """, (item["title"], category, confidence))
+
+        except sqlite3.IntegrityError:
+            pass
+
+        except Exception as e:
+            print(f"❌ SAVE ERROR: {e}")
+
+    conn.commit()
+
+# =========================
+# MAIN LOOP
+# =========================
+
+def run():
+
+    first_run = True
+
+    while True:
+
+        try:
+            print(f"\n🔄 Checking for news... ({time.strftime('%H:%M:%S')})")
+
+            html = get_html()
+
+            limit = 5 if first_run else 50
+            news = extract_news(html, limit=limit)
+
+            first_run = False
+
+            if news:
+                save_news(news)
+                print(f"✅ Added {len(news)} articles.")
+            else:
+                print("😴 No new updates.")
+
+        except requests.exceptions.RequestException as e:
+            print(f"🌐 NETWORK ERROR: {e}")
+            time.sleep(10) 
+
+        except Exception as e:
+            print(f"⚠️ LOOP ERROR: {e}")
+            time.sleep(5)
+
+
+        time.sleep(60)
+
+# =========================
+# START
+# =========================
+
+if __name__ == "__main__":
+
+    run()
