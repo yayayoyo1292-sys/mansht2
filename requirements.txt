@@ -1,0 +1,8 @@
+arabic_reshaper==3.0.0
+beautifulsoup4==4.14.3
+joblib==1.5.3
+pandas==3.0.2
+Pillow==12.2.0
+python-dotenv==1.2.2
+Requests==2.33.1
+scikit_learn==1.8.0
