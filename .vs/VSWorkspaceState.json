@@ -1,7 +1,9 @@
 {
   "ExpandedNodes": [
-    ""
+    "",
+    "\\news-ui",
+    "\\news-ui\\src"
   ],
-  "SelectedNode": "\\.gitignore",
+  "SelectedNode": "\\reviewapp.py",
   "PreviewInSolutionExplorer": false
 }

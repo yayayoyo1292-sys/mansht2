@@ -1,1 +1,1 @@
-worker: python app3.py
+worker: python review_news.py

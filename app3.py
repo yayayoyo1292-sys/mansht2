@@ -19,8 +19,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BASE_DIR = r"C:\Users\oalaa\مانشت"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
+
 
 TEMPLATE_CONFIG = {
 
@@ -74,20 +75,18 @@ MAP = {
 
 
 def clean_text(text):
-    return unicodedata.normalize("NFKC", text)
+    return unicodedata.normalize("NFKC", str(text or ""))
 
 
 def send_photo(image_path, title, url, category, confidence, content):
     api_url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
 
     title = clean_text(title)
-    content = clean_text(content)
-
+    content = clean_text(content or "")
 
     short_content = content[:500] + "..." if len(content) > 500 else content
 
     caption = f"""
-📰 {title}
 
 📂 التصنيف: {category}
 🎯 الثقة: {round(confidence * 100, 1)}%
@@ -99,18 +98,8 @@ def send_photo(image_path, title, url, category, confidence, content):
 
     keyboard = {
         "inline_keyboard": [
-            [
-                {
-                    "text": "📖 Read More",
-                    "url": url
-                }
-            ],
-            [
-                {
-                    "text": "🔗 Share",
-                    "url": f"https://t.me/share/url?url={url}&text={title}"
-                }
-            ]
+            [{"text": "📖 Read More", "url": url}],
+            [{"text": "🔗 Share", "url": f"https://t.me/share/url?url={url}&text={title}"}]
         ]
     }
 
@@ -123,9 +112,7 @@ def send_photo(image_path, title, url, category, confidence, content):
                 "reply_markup": json.dumps(keyboard),
                 "parse_mode": "HTML"
             },
-            files={
-                "photo": photo
-            }
+            files={"photo": photo}
         )
 
 
@@ -446,7 +433,7 @@ def fit_text(
         best_line_height
     )
 
-def generate_post_image(title, image_url, news_id, url, category):
+def generate_post_image(title, image_url, news_id, url, category, confidence, content):
 
     print("CATEGORY DEBUG:", category)
     print("AVAILABLE KEYS:", TEMPLATE_CONFIG.keys())
@@ -601,7 +588,7 @@ def generate_post_image(title, image_url, news_id, url, category):
 
         final_img.save(output_path, quality=100)
 
-        send_photo(output_path, title=title, url=url)
+        send_photo(output_path, None, url, category, confidence, content)
 
         print(f"🖼️ IMAGE SAVED: {output_path}")
 
@@ -752,7 +739,9 @@ def save_news(news):
                 item["image"],
                 news_id,
                 item["url"],
-                category
+                category,
+                confidence,
+                item.get("content")
             )
 
             # =====================
@@ -808,7 +797,7 @@ def run():
             time.sleep(5)
 
 
-        time.sleep(60)
+        time.sleep(90)
 
 # =========================
 # START
